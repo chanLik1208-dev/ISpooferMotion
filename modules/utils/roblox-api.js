@@ -205,7 +205,7 @@ async function getPlaceIdFromCreator(creatorType, creatorId, cookie, maxPlaceIds
     // Check if there's a next page
       if (allGames.length < maxPlaceIds) {
           const delayMs = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
-          if (DEVELOPER_MODE) console.log(`(Dev) Sleep ${delayMs} ms for bypass detect...`);
+          if (DEVELOPER_MODE) console.log(`(Dev) Sleep ${delayMs} ms for bypass...`);
           await sleep(delayMs);
       }
 
@@ -254,9 +254,55 @@ async function getMultiplePlaceIds(creatorType, creatorId, cookie, maxPlaceIds =
   }
 }
 
+/**
+ * Spoof Client Headers is roblox gaming loading and Get Audio CDN URL from AssetDelivery API
+ */
+async function getAudioCdnUrl(assetId, cookie) {
+    const endpoint = `https://assetdelivery.roblox.com/v2/assetId/${assetId}`;
+
+    const response = await fetch(endpoint, {
+        headers: {
+            'Cookie': `.ROBLOSECURITY=${cookie}`,
+            'User-Agent': 'Roblox/WinInet',
+            'Roblox-Browser-Asset-Request': 'false',
+            'Accept': 'application/json'
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`AssetDelivery API Refused (${response.status})`);
+    }
+
+    const data = await response.json();
+    if (data.locations && data.locations.length > 0) {
+        return data.locations[0].location;
+    throw new Error('403: Not Perm or Not in server');
+}
+
+async function downloadAudioById(assetId, cookie, outputPath) {
+    try {
+        const cdnUrl = await getAudioCdnUrl(assetId, cookie);
+        const response = await fetch(cdnUrl);
+
+        if (!response.ok) {
+            throw new Error(`Fail : (${response.status})`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+
+        await fs.writeFile(outputPath, buffer);
+        return true;
+    } catch (error) {
+        throw error;
+    }
+}
+
 module.exports = {
   getCookieFromRobloxStudio,
   getCsrfToken,
   getPlaceIdFromCreator,
   getMultiplePlaceIds,
+  downloadAudioById,
+  getAudioCdnUrl,
 };

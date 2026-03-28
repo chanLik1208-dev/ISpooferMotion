@@ -3,7 +3,7 @@ const path = require('path');
 const { ipcMain, app } = require('electron');
 const crypto = require('crypto');
 const { DEVELOPER_MODE } = require('./common');
-const { getCookieFromRobloxStudio, getCsrfToken, getPlaceIdFromCreator } = require('./roblox-api');
+const { getCookieFromRobloxStudio, getCsrfToken, getPlaceIdFromCreator, getAudioCdnUrl } = require('./roblox-api');
 const { clearDownloadsDirectory, retryAsync, sanitizeFilename } = require('./common');
 const { downloadAnimationAssetWithProgress, publishAnimationRbxmWithProgress } = require('./transfer-handlers');
 const fs = require('fs').promises;
@@ -304,182 +304,200 @@ async function handleSpooferAction(data, getMainWindowFn, sendTransferUpdate, se
   }
 
   // Batch download locations
-  const locationsMap = {};
-  const batchItems = animationEntries.map((entry) => ({
-    requestId: entry.id,
-    assetId: parseInt(entry.id),
-    assetType: assetTypeName,
-    creatorType: entry.creatorType,
-    creatorId: entry.creatorId,
-  }));
-  // Batch behavior controls (allow overrides via incoming data)
-  const BATCH_MAX_RETRIES = parseInt(data.batchRetries, 10) || 3;
-  const BATCH_RETRY_DELAY_MS = parseInt(data.batchRetryDelay, 10) || 2000;
-  const BATCH_TIMEOUT_MS = parseInt(data.batchTimeoutMs, 10) || 15000; // 15s per batch
-  const chunkSize = parseInt(data.batchChunkSize, 10) || 20; // Reduce from 50 to 20 by default to mitigate 504s
+    const locationsMap = {};
+    const batchItems = animationEntries.map((entry) => ({
+        requestId: entry.id,
+        assetId: parseInt(entry.id),
+        assetType: assetTypeName,
+        creatorType: entry.creatorType,
+        creatorId: entry.creatorId,
+    }));
+    // Batch behavior controls
+    const BATCH_MAX_RETRIES = parseInt(data.batchRetries, 10) || 3;
+    const BATCH_RETRY_DELAY_MS = parseInt(data.batchRetryDelay, 10) || 2000;
+    const BATCH_TIMEOUT_MS = parseInt(data.batchTimeoutMs, 10) || 15000;
+    const chunkSize = parseInt(data.batchChunkSize, 10) || 20;
 
-  if (DEVELOPER_MODE) console.log(`(Dev) Fetching batch locations for ${batchItems.length} ${isSoundMode ? 'sounds' : 'animations'} with creator-specific placeIds`);
-  for (let i = 0; i < batchItems.length; i += chunkSize) {
-    const chunk = batchItems.slice(i, i + chunkSize);
-    try {
-      // Group items by creator to use the correct placeId
-      const creatorGroups = {};
-      for (const item of chunk) {
-        const creatorKey = `${item.creatorType}:${item.creatorId}`;
-        if (!creatorGroups[creatorKey]) creatorGroups[creatorKey] = [];
-        creatorGroups[creatorKey].push(item);
-      }
-      
-      // Process each creator group separately
-      for (const [creatorKey, items] of Object.entries(creatorGroups)) {
-        let [creatorType, creatorId] = creatorKey.split(':');
-        let placeIdArray = placeIdMap[creatorKey] || [99840799534728];
-        let placeIdIndex = 0;
-        let retryCount = 0;
-        const maxRetries = maxPlaceIdRetries;
-        
-        while (placeIdIndex < placeIdArray.length) {
-          const placeId = placeIdArray[placeIdIndex];
-          const itemsWithoutCreator = items.map(({ creatorType, creatorId, ...rest }) => rest);
-          
-          if (DEVELOPER_MODE) console.log(`(Dev) Batch request for ${creatorKey}: ${items.length} items with placeId ${placeId}${placeIdIndex > 0 ? ` (place index ${placeIdIndex}/${placeIdArray.length})` : ''}`);
-          
-          // Batch fetch with retry + timeout (retry on 429/5xx/504/timeout)
-          let locations;
-          for (let attempt = 1; attempt <= BATCH_MAX_RETRIES; attempt++) {
-            const controller = new AbortController();
-            const timeout = setTimeout(() => controller.abort(), BATCH_TIMEOUT_MS);
-            let resp;
-            let caughtErr = null;
+    if (isSoundMode) {
+        if (DEVELOPER_MODE) console.log(`(Dev) Use SoundMode，has ${batchItems.length} object...`);
+        sendStatusMessage('Resolving audio CDN links...');
+
+        for (const item of batchItems) {
             try {
-              resp = await fetch('https://assetdelivery.roblox.com/v2/assets/batch', {
-                method: 'POST',
-                headers: {
-                  'User-Agent': 'RobloxStudio/WinInet',
-                  'Content-Type': 'application/json',
-                  'Cookie': `.ROBLOSECURITY=${robloxCookie}`,
-                  'Roblox-Place-Id': String(placeId),
-                },
-                body: JSON.stringify(itemsWithoutCreator),
-                signal: controller.signal,
-              });
+                const cdnUrl = await getAudioCdnUrl(item.assetId, robloxCookie);
+                locationsMap[item.requestId] = {
+                    locations: [{ location: cdnUrl }]
+                };
+                if (DEVELOPER_MODE) console.log(`(Dev) Done CDN: ${item.assetId}`);
             } catch (err) {
-              caughtErr = err;
-            } finally {
-              clearTimeout(timeout);
+                locationsMap[item.requestId] = { errors: [{ message: err.message }] };
             }
-
-            if (resp && resp.ok) {
-              locations = await resp.json();
-              break;
-            }
-
-            // Decide if retryable
-            const status = resp ? resp.status : 0;
-            const isTimeout = caughtErr && (caughtErr.name === 'AbortError' || /aborted|timeout/i.test(caughtErr.message));
-            const retryable = isTimeout || status === 429 || status === 502 || status === 503 || status === 504 || status === 500;
-            const statusText = resp ? `${status}` : (isTimeout ? 'timeout' : (caughtErr ? caughtErr.message : 'unknown'));
-            if (DEVELOPER_MODE) console.warn(`(Dev) Batch attempt ${attempt}/${BATCH_MAX_RETRIES} for ${creatorKey} @ place ${placeId} failed: ${statusText}${retryable && attempt < BATCH_MAX_RETRIES ? ' -> retrying' : ''}`);
-
-            if (!retryable || attempt === BATCH_MAX_RETRIES) {
-              throw new Error(`Batch request failed for ${creatorKey}: ${statusText}`);
-            }
-
-            // Backoff with basic jitter
-            const jitter = Math.floor(Math.random() * 300);
-            await new Promise(r => setTimeout(r, BATCH_RETRY_DELAY_MS + jitter));
-          }
-
-          if (!locations) throw new Error(`Batch request failed for ${creatorKey}: no response`);
-          if (DEVELOPER_MODE) console.log(`(Dev) Batch response for ${creatorKey}:`, locations);
-          
-          // Check if response contains batch errors (403s for restricted assets)
-          const hasBatchErrors = locations.some(loc => loc.errors && loc.errors.length > 0 && loc.errors[0].code === 403);
-
-          // Print detailed batch errors for visibility
-          const errorItems = locations.filter(loc => loc.errors && loc.errors.length > 0);
-          if (errorItems.length > 0) {
-            for (const locErr of errorItems) {
-              const firstErr = locErr.errors[0] || {};
-              const errMsg = firstErr.Message || firstErr.message || JSON.stringify(firstErr);
-              console.warn(`Batch error for ${locErr.requestId} at place ${placeId}:`, firstErr);
-              if (DEVELOPER_MODE) console.log('(Dev) Full batch item with error:', JSON.stringify(locErr, null, 2).substring(0, 500));
-            }
-          }
-          
-          if (hasBatchErrors) {
-            if (placeIdIndex < placeIdArray.length - 1) {
-              // Try next place ID
-              if (DEVELOPER_MODE) console.log(`(Dev) Batch errors detected for ${creatorKey} with placeId ${placeId}. Trying next place...`);
-              placeIdIndex++;
-              continue;
-            } else {
-              // All places exhausted
-              // If an override is set, do NOT fetch fresh place IDs; accept errors
-              if (overridePlaceId) {
-                if (DEVELOPER_MODE) console.log(`(Dev) Override Place ID in use for ${creatorKey}. Skipping fresh placeId fetch and accepting batch errors.`);
-                for (const loc of locations) {
-                  locationsMap[loc.requestId] = loc;
-                }
-                break;
-              }
-              // Otherwise, try to get fresh place IDs with retries
-              if (retryCount < maxRetries) {
-                retryCount++;
-                if (DEVELOPER_MODE) console.log(`(Dev) All places exhausted for ${creatorKey}. Fetching fresh placeIds (retry ${retryCount}/${maxRetries})...`);
-                try {
-                  const freshPlaceIds = await retryAsync(
-                    () => getPlaceIdFromCreator(creatorType, creatorId, robloxCookie, maxPlaceIds),
-                    1,
-                    1000
-                  );
-                  placeIdMap[creatorKey] = Array.isArray(freshPlaceIds) ? freshPlaceIds : [freshPlaceIds];
-                  placeIdArray = placeIdMap[creatorKey];
-                  placeIdIndex = 0;
-                  if (DEVELOPER_MODE) console.log(`(Dev) Got fresh placeIds for ${creatorKey}: ${placeIdArray.join(', ')}`);
-                  continue;
-                } catch (refreshErr) {
-                  if (DEVELOPER_MODE) console.warn(`(Dev) Failed to refresh placeIds for ${creatorKey}: ${refreshErr.message}`);
-                  // Accept the errors and continue
-                  for (const loc of locations) {
-                    locationsMap[loc.requestId] = loc;
-                  }
-                  break;
-                }
-              } else {
-                // Max retries reached, accept the errors
-                if (DEVELOPER_MODE) console.log(`(Dev) Max retries reached for ${creatorKey}, accepting batch errors`);
-                for (const loc of locations) {
-                  locationsMap[loc.requestId] = loc;
-                }
-                break;
-              }
-            }
-          } else {
-            // Success - no errors
-            if (DEVELOPER_MODE) console.log(`(Dev) Batch request successful for ${creatorKey} with placeId ${placeId}`);
-            for (const loc of locations) {
-              locationsMap[loc.requestId] = loc;
-            }
-            break;
-          }
+            // Delay
+            await new Promise(r => setTimeout(r, 400));
         }
-      }
-    } catch (error) {
-      console.error('Batch request error:', error);
-      // Consider only 401/403 as auth errors; 5xx/504/timeout are not auth
-      const msg = (error && error.message) ? error.message : '';
-      if (/\b401\b|\b403\b/.test(msg)) {
-        hasAuthError = true;
-      }
-      sendStatusMessage(`Batch request failed: ${error.message}`);
-      for (const item of chunk) {
-        const transfer = initialTransferStates.find((t) => t.originalAssetId === item.requestId);
-        if (transfer) sendTransferUpdate({ id: transfer.id, status: 'error', error: 'Batch request failed' });
-      }
-    }
-  }
+    } else {
+        if (DEVELOPER_MODE) console.log(`(Dev) Fetching batch locations for ${batchItems.length} ${isSoundMode ? 'sounds' : 'animations'} with creator-specific placeIds`);
+        for (let i = 0; i < batchItems.length; i += chunkSize) {
+            const chunk = batchItems.slice(i, i + chunkSize);
+            try {
+                // Group items by creator to use the correct placeId
+                const creatorGroups = {};
+                for (const item of chunk) {
+                    const creatorKey = `${item.creatorType}:${item.creatorId}`;
+                    if (!creatorGroups[creatorKey]) creatorGroups[creatorKey] = [];
+                    creatorGroups[creatorKey].push(item);
+                }
 
+                // Process each creator group separately
+                for (const [creatorKey, items] of Object.entries(creatorGroups)) {
+                    let [creatorType, creatorId] = creatorKey.split(':');
+                    let placeIdArray = placeIdMap[creatorKey] || [99840799534728];
+                    let placeIdIndex = 0;
+                    let retryCount = 0;
+                    const maxRetries = maxPlaceIdRetries;
+
+                    while (placeIdIndex < placeIdArray.length) {
+                        const placeId = placeIdArray[placeIdIndex];
+                        const itemsWithoutCreator = items.map(({ creatorType, creatorId, ...rest }) => rest);
+
+                        if (DEVELOPER_MODE) console.log(`(Dev) Batch request for ${creatorKey}: ${items.length} items with placeId ${placeId}${placeIdIndex > 0 ? ` (place index ${placeIdIndex}/${placeIdArray.length})` : ''}`);
+
+                        // Batch fetch with retry + timeout (retry on 429/5xx/504/timeout)
+                        let locations;
+                        for (let attempt = 1; attempt <= BATCH_MAX_RETRIES; attempt++) {
+                            const controller = new AbortController();
+                            const timeout = setTimeout(() => controller.abort(), BATCH_TIMEOUT_MS);
+                            let resp;
+                            let caughtErr = null;
+                            try {
+                                resp = await fetch('https://assetdelivery.roblox.com/v2/assets/batch', {
+                                    method: 'POST',
+                                    headers: {
+                                        'User-Agent': 'RobloxStudio/WinInet',
+                                        'Content-Type': 'application/json',
+                                        'Cookie': `.ROBLOSECURITY=${robloxCookie}`,
+                                        'Roblox-Place-Id': String(placeId),
+                                    },
+                                    body: JSON.stringify(itemsWithoutCreator),
+                                    signal: controller.signal,
+                                });
+                            } catch (err) {
+                                caughtErr = err;
+                            } finally {
+                                clearTimeout(timeout);
+                            }
+
+                            if (resp && resp.ok) {
+                                locations = await resp.json();
+                                break;
+                            }
+
+                            // Decide if retryable
+                            const status = resp ? resp.status : 0;
+                            const isTimeout = caughtErr && (caughtErr.name === 'AbortError' || /aborted|timeout/i.test(caughtErr.message));
+                            const retryable = isTimeout || status === 429 || status === 502 || status === 503 || status === 504 || status === 500;
+                            const statusText = resp ? `${status}` : (isTimeout ? 'timeout' : (caughtErr ? caughtErr.message : 'unknown'));
+                            if (DEVELOPER_MODE) console.warn(`(Dev) Batch attempt ${attempt}/${BATCH_MAX_RETRIES} for ${creatorKey} @ place ${placeId} failed: ${statusText}${retryable && attempt < BATCH_MAX_RETRIES ? ' -> retrying' : ''}`);
+
+                            if (!retryable || attempt === BATCH_MAX_RETRIES) {
+                                throw new Error(`Batch request failed for ${creatorKey}: ${statusText}`);
+                            }
+
+                            // Backoff with basic jitter
+                            const jitter = Math.floor(Math.random() * 300);
+                            await new Promise(r => setTimeout(r, BATCH_RETRY_DELAY_MS + jitter));
+                        }
+
+                        if (!locations) throw new Error(`Batch request failed for ${creatorKey}: no response`);
+                        if (DEVELOPER_MODE) console.log(`(Dev) Batch response for ${creatorKey}:`, locations);
+
+                        // Check if response contains batch errors (403s for restricted assets)
+                        const hasBatchErrors = locations.some(loc => loc.errors && loc.errors.length > 0 && loc.errors[0].code === 403);
+
+                        // Print detailed batch errors for visibility
+                        const errorItems = locations.filter(loc => loc.errors && loc.errors.length > 0);
+                        if (errorItems.length > 0) {
+                            for (const locErr of errorItems) {
+                                const firstErr = locErr.errors[0] || {};
+                                const errMsg = firstErr.Message || firstErr.message || JSON.stringify(firstErr);
+                                console.warn(`Batch error for ${locErr.requestId} at place ${placeId}:`, firstErr);
+                                if (DEVELOPER_MODE) console.log('(Dev) Full batch item with error:', JSON.stringify(locErr, null, 2).substring(0, 500));
+                            }
+                        }
+
+                        if (hasBatchErrors) {
+                            if (placeIdIndex < placeIdArray.length - 1) {
+                                // Try next place ID
+                                if (DEVELOPER_MODE) console.log(`(Dev) Batch errors detected for ${creatorKey} with placeId ${placeId}. Trying next place...`);
+                                placeIdIndex++;
+                                continue;
+                            } else {
+                                // All places exhausted
+                                // If an override is set, do NOT fetch fresh place IDs; accept errors
+                                if (overridePlaceId) {
+                                    if (DEVELOPER_MODE) console.log(`(Dev) Override Place ID in use for ${creatorKey}. Skipping fresh placeId fetch and accepting batch errors.`);
+                                    for (const loc of locations) {
+                                        locationsMap[loc.requestId] = loc;
+                                    }
+                                    break;
+                                }
+                                // Otherwise, try to get fresh place IDs with retries
+                                if (retryCount < maxRetries) {
+                                    retryCount++;
+                                    if (DEVELOPER_MODE) console.log(`(Dev) All places exhausted for ${creatorKey}. Fetching fresh placeIds (retry ${retryCount}/${maxRetries})...`);
+                                    try {
+                                        const freshPlaceIds = await retryAsync(
+                                            () => getPlaceIdFromCreator(creatorType, creatorId, robloxCookie, maxPlaceIds),
+                                            1,
+                                            1000
+                                        );
+                                        placeIdMap[creatorKey] = Array.isArray(freshPlaceIds) ? freshPlaceIds : [freshPlaceIds];
+                                        placeIdArray = placeIdMap[creatorKey];
+                                        placeIdIndex = 0;
+                                        if (DEVELOPER_MODE) console.log(`(Dev) Got fresh placeIds for ${creatorKey}: ${placeIdArray.join(', ')}`);
+                                        continue;
+                                    } catch (refreshErr) {
+                                        if (DEVELOPER_MODE) console.warn(`(Dev) Failed to refresh placeIds for ${creatorKey}: ${refreshErr.message}`);
+                                        // Accept the errors and continue
+                                        for (const loc of locations) {
+                                            locationsMap[loc.requestId] = loc;
+                                        }
+                                        break;
+                                    }
+                                } else {
+                                    // Max retries reached, accept the errors
+                                    if (DEVELOPER_MODE) console.log(`(Dev) Max retries reached for ${creatorKey}, accepting batch errors`);
+                                    for (const loc of locations) {
+                                        locationsMap[loc.requestId] = loc;
+                                    }
+                                    break;
+                                }
+                            }
+                        } else {
+                            // Success - no errors
+                            if (DEVELOPER_MODE) console.log(`(Dev) Batch request successful for ${creatorKey} with placeId ${placeId}`);
+                            for (const loc of locations) {
+                                locationsMap[loc.requestId] = loc;
+                            }
+                            break;
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error('Batch request error:', error);
+                // Consider only 401/403 as auth errors; 5xx/504/timeout are not auth
+                const msg = (error && error.message) ? error.message : '';
+                if (/\b401\b|\b403\b/.test(msg)) {
+                    hasAuthError = true;
+                }
+                sendStatusMessage(`Batch request failed: ${error.message}`);
+                for (const item of chunk) {
+                    const transfer = initialTransferStates.find((t) => t.originalAssetId === item.requestId);
+                    if (transfer) sendTransferUpdate({ id: transfer.id, status: 'error', error: 'Batch request failed' });
+                }
+            }
+        }
+    }
   const UPLOAD_RETRIES = parseInt(data.uploadRetries, 10) || 3;
   const UPLOAD_RETRY_DELAY_MS = parseInt(data.uploadRetryDelay, 10) || 5000;
   // Download controls (optional overrides via data)
