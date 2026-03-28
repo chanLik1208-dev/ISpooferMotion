@@ -555,102 +555,95 @@ async function handleSpooferAction(data, getMainWindowFn, sendTransferUpdate, se
   });
   const downloadResults = await Promise.all(downloadPromises);
 
-    // Parallel uploads (skip if download-only mode)
-  let uploadResults = [];
-  if (data.downloadOnly) {
-    sendStatusMessage('Download-only mode: Skipping uploads');
-    if (DEVELOPER_MODE) console.log('(Dev) Download-only mode enabled, skipping all uploads');
-  } else {
-    sendStatusMessage(`Uploading ${isSoundMode ? 'sounds' : 'animations'}...`);
-    let uploadCompleted = 0;
-    const uploadStartTime = Date.now();
-    const successfulDownloads = downloadResults.filter((r) => r.success);
-    const uploadPromises = successfulDownloads.map(async (downloadResult) => {
-    const entry = downloadResult.entry;
-    const filePath = downloadResult.filePath;
-    const uploadTransferId = crypto.randomUUID();
-    const fileSize = (await fs.stat(filePath).catch(() => ({ size: 0 }))).size;
-    sendTransferUpdate({
-      id: uploadTransferId,
-      name: entry.name,
-      originalAssetId: entry.id,
-      status: 'queued',
-      direction: 'upload',
-      progress: 0,
-      size: fileSize,
-    });
-    const onRetryAttempt = (attempt, maxAttempts, err) => {
-      const errMsg = err.message || '';
-      const isRateLimit = errMsg.includes('429') || errMsg.includes('Rate limit');
-      const logMsg = isRateLimit 
-        ? `Upload attempt ${attempt}/${maxAttempts} for ${entry.name} rate-limited (429). Retrying with delay...`
-        : `Upload attempt ${attempt}/${maxAttempts} for ${entry.name} failed. Retrying...`;
-      if (DEVELOPER_MODE && isRateLimit) {
-        console.warn(`(Dev) [RATE LIMIT DETECTED] ${entry.name}: ${errMsg}`);
-      }
-      sendTransferUpdate({
-        id: uploadTransferId,
-        status: 'processing',
-        message: logMsg,
-        error: err.message.substring(0, 120),
-      });
-    };
-        const uploadFn = () => {
-            const targetGroupId = data.groupId && String(data.groupId).trim() ? data.groupId : null;
+    // 💡 修改為：循序上傳 (Sequential Uploads) 以避免 429 Rate Limit
+    let uploadResults = [];
+    if (data.downloadOnly) {
+        sendStatusMessage('Download-only mode: Skipping uploads');
+        if (DEVELOPER_MODE) console.log('(Dev) Download-only mode enabled, skipping all uploads');
+    } else {
+        sendStatusMessage(`Uploading ${isSoundMode ? 'sounds' : 'animations'}...`);
+        let uploadCompleted = 0;
+        const uploadStartTime = Date.now();
+        const successfulDownloads = downloadResults.filter((r) => r.success);
 
-            // 💡 如果是音效模式，呼叫新寫的 publishAudioWithProgress
-            if (isSoundMode) {
-                // 請確保 ipc-handlers.js 頂部有引入 publishAudioWithProgress
-                return publishAudioWithProgress(
-                    filePath,
-                    entry.name,
-                    robloxCookie,
-                    csrfToken,
-                    targetGroupId,
-                    uploadTransferId,
-                    sendTransferUpdate
-                );
-            } else {
-                // 如果是動畫，呼叫舊的
-                return publishAnimationRbxmWithProgress(
-                    filePath,
-                    entry.name,
-                    robloxCookie,
-                    csrfToken,
-                    targetGroupId,
-                    uploadTransferId,
-                    sendTransferUpdate,
-                    assetTypeName
-                );
+        // 取得使用者設定的延遲時間，如果沒有則預設為 10000 毫秒 (10秒)
+        // ⚠️ 針對大量音效上傳，強烈建議至少設定 10 秒以上的延遲
+        const uploadDelayMs = parseInt(data.uploadDelayMs, 5) || 5000;
+
+        for (let i = 0; i < successfulDownloads.length; i++) {
+            const downloadResult = successfulDownloads[i];
+            const entry = downloadResult.entry;
+            const filePath = downloadResult.filePath;
+            const uploadTransferId = crypto.randomUUID();
+            const fileSize = (await fs.stat(filePath).catch(() => ({ size: 0 }))).size;
+
+            sendTransferUpdate({
+                id: uploadTransferId,
+                name: entry.name,
+                originalAssetId: entry.id,
+                status: 'queued',
+                direction: 'upload',
+                progress: 0,
+                size: fileSize,
+            });
+
+            const onRetryAttempt = (attempt, maxAttempts, err) => {
+                const errMsg = err.message || '';
+                const isRateLimit = errMsg.includes('429') || errMsg.includes('Rate limit');
+                const logMsg = isRateLimit
+                    ? `Upload attempt ${attempt}/${maxAttempts} for ${entry.name} rate-limited (429). Retrying with delay...`
+                    : `Upload attempt ${attempt}/${maxAttempts} for ${entry.name} failed. Retrying...`;
+                if (DEVELOPER_MODE && isRateLimit) {
+                    console.warn(`(Dev) [RATE LIMIT DETECTED] ${entry.name}: ${errMsg}`);
+                }
+                sendTransferUpdate({
+                    id: uploadTransferId,
+                    status: 'processing',
+                    message: logMsg,
+                    error: err.message.substring(0, 120),
+                });
+            };
+
+            const uploadFn = () => {
+                const targetGroupId = data.groupId && String(data.groupId).trim() ? data.groupId : null;
+                if (isSoundMode) {
+                    return publishAudioWithProgress(filePath, entry.name, robloxCookie, csrfToken, targetGroupId, uploadTransferId, sendTransferUpdate);
+                } else {
+                    return publishAnimationRbxmWithProgress(filePath, entry.name, robloxCookie, csrfToken, targetGroupId, uploadTransferId, sendTransferUpdate, assetTypeName);
+                }
+            };
+
+            try {
+                const uploadResult = await retryAsync(uploadFn, UPLOAD_RETRIES, UPLOAD_RETRY_DELAY_MS, onRetryAttempt);
+                uploadCompleted++;
+
+                uploadResults.push({ entry, success: uploadResult.success, assetId: uploadResult.assetId, error: uploadResult.error });
+
+                // 更新進度與 ETA
+                const elapsed = (Date.now() - uploadStartTime) / 1000;
+                const avgTimePerItem = elapsed / uploadCompleted;
+                const remaining = successfulDownloads.length - uploadCompleted;
+                const etaSeconds = Math.ceil(avgTimePerItem * remaining);
+                const etaMin = Math.floor(etaSeconds / 60);
+                const etaSec = etaSeconds % 60;
+                const etaStr = remaining > 0 ? ` (ETA: ${etaMin}:${String(etaSec).padStart(2, '0')})` : '';
+                sendStatusMessage(`Uploaded ${uploadCompleted}/${successfulDownloads.length} ${isSoundMode ? 'sounds' : 'animations'}${etaStr}`);
+
+            } catch (finalRetryError) {
+                sendTransferUpdate({ id: uploadTransferId, status: 'error', error: `All upload attempts failed: ${finalRetryError.message}` });
+                uploadCompleted++;
+                uploadResults.push({ entry, success: false, error: finalRetryError.message });
             }
-        };    try {
-      const uploadResult = await retryAsync(uploadFn, UPLOAD_RETRIES, UPLOAD_RETRY_DELAY_MS, onRetryAttempt);
-      uploadCompleted++;
-      const elapsed = (Date.now() - uploadStartTime) / 1000;
-      const avgTimePerItem = elapsed / uploadCompleted;
-      const remaining = successfulDownloads.length - uploadCompleted;
-      const etaSeconds = Math.ceil(avgTimePerItem * remaining);
-      const etaMin = Math.floor(etaSeconds / 60);
-      const etaSec = etaSeconds % 60;
-      const etaStr = remaining > 0 ? ` (ETA: ${etaMin}:${String(etaSec).padStart(2, '0')})` : '';
-      sendStatusMessage(`Uploaded ${uploadCompleted}/${successfulDownloads.length} ${isSoundMode ? 'sounds' : 'animations'}${etaStr}`);
-      return { entry, success: uploadResult.success, assetId: uploadResult.assetId, error: uploadResult.error };
-    } catch (finalRetryError) {
-      sendTransferUpdate({ id: uploadTransferId, status: 'error', error: `All upload attempts failed: ${finalRetryError.message}` });
-      uploadCompleted++;
-      const elapsed = (Date.now() - uploadStartTime) / 1000;
-      const avgTimePerItem = elapsed / uploadCompleted;
-      const remaining = successfulDownloads.length - uploadCompleted;
-      const etaSeconds = Math.ceil(avgTimePerItem * remaining);
-      const etaMin = Math.floor(etaSeconds / 60);
-      const etaSec = etaSeconds % 60;
-      const etaStr = remaining > 0 ? ` (ETA: ${etaMin}:${String(etaSec).padStart(2, '0')})` : '';
-      sendStatusMessage(`Uploaded ${uploadCompleted}/${successfulDownloads.length} ${isSoundMode ? 'sounds' : 'animations'}${etaStr}`);
-      return { entry, success: false, error: finalRetryError.message };
+
+            // 💡 關鍵：在上傳下一個檔案之前，強制等待一段時間 (Upload Delay)
+            // 如果不是最後一個檔案，就等待
+            if (i < successfulDownloads.length - 1) {
+                if (DEVELOPER_MODE) console.log(`(Dev) Waiting ${uploadDelayMs}ms before next upload to avoid rate limits...`);
+                sendTransferUpdate({ id: uploadTransferId, status: 'processing', message: `等待 ${uploadDelayMs / 1000} 秒以避免觸發速率限制...` });
+                await new Promise(r => setTimeout(r, uploadDelayMs));
+            }
+        }
     }
-  });
-    uploadResults = await Promise.all(uploadPromises);
-  }
 
   // Process results
   for (const downloadResult of downloadResults) {
