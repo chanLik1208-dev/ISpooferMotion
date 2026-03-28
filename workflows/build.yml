@@ -1,0 +1,39 @@
+name: Compile Node.js Script
+
+# 設定觸發條件：當推送程式碼到 main 分支，或是手動點擊按鈕時執行
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: 
+
+jobs:
+  build:
+    # 由於你的程式碼使用了 keytar（需要存取系統憑證），建議在 Windows 環境下編譯
+    runs-on: windows-latest
+
+    steps:
+    # 1. 取得儲存庫的程式碼
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # 2. 設定 Node.js 環境
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18.x' # 建議使用 LTS 版本
+
+    # 3. 安裝依賴套件 (包含 keytar 等)
+    - name: Install dependencies
+      run: npm install
+
+    # 4. 執行編譯/打包指令
+    - name: Compile Executable
+      run: npm run build
+
+    # 5. 將編譯好的 .exe 檔案上傳為 Artifact，供你下載
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: roblox-tool-windows
+        path: roblox-tool.exe
+        retention-days: 7 # 檔案保留天數
