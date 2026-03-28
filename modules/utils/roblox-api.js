@@ -6,6 +6,25 @@ const keytar = require('keytar');
 const fs = require('fs').promises;
 const { DEVELOPER_MODE } = require('./common');
 
+// Delay
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+const randomSleep = (min, max) => sleep(Math.floor(Math.random() * (max - min + 1)) + min);
+
+// Spoof Header
+
+const SPOOFED_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7',
+    'Sec-Ch-Ua': '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+};
+
 /**
  * Retrieves Roblox cookie from Roblox Studio or Windows Credential Manager
  */
@@ -75,27 +94,37 @@ async function getCookieFromRobloxStudio(userId = null) {
  * Fetches CSRF token from Roblox auth endpoint
  */
 async function getCsrfToken(cookie) {
-  const csrfUrl = 'https://auth.roblox.com/v2/logout';
-  const csrfHeaders = { 'Cookie': `.ROBLOSECURITY=${cookie}`, 'Content-Type': 'application/json' };
-  let response;
-  try {
-    response = await fetch(csrfUrl, { method: 'POST', headers: csrfHeaders, body: JSON.stringify({}) });
-  } catch (networkError) {
-    console.error('Network error fetching CSRF token:', networkError);
-    throw new Error(`Network error fetching CSRF token: ${networkError.message}`);
-  }
-  const token = response.headers.get('x-csrf-token');
-  if (!token) {
-    let errorDetails = `CSRF token endpoint (${csrfUrl}) returned status ${response.status}.`;
+    const csrfUrl = 'https://auth.roblox.com/v2/logout';
+
+    // Add A new Spoofed Header to Mimic Roblox Studio Requests
+    const csrfHeaders = {
+        ...SPOOFED_HEADERS,
+        'Cookie': `.ROBLOSECURITY=${cookie}`,
+        'Content-Type': 'application/json',
+        'Origin': 'https://www.roblox.com',
+        'Referer': 'https://www.roblox.com/'
+    };
+
+    let response;
     try {
-      const textBody = await response.text();
-      errorDetails += ` Body: ${textBody.substring(0, 200)}`;
-    } catch (e) {
-      // ignore
+        response = await fetch(csrfUrl, { method: 'POST', headers: csrfHeaders, body: JSON.stringify({}) });
+    } catch (networkError) {
+        console.error('Network error fetching CSRF token:', networkError);
+        throw new Error(`Network error fetching CSRF token: ${networkError.message}`);
     }
-    throw new Error(`No X-CSRF-TOKEN in response header. ${errorDetails}`);
-  }
-  return token;
+
+    const token = response.headers.get('x-csrf-token');
+    if (!token) {
+        let errorDetails = `CSRF token endpoint (${csrfUrl}) returned status ${response.status}.`;
+        try {
+            const textBody = await response.text();
+            errorDetails += ` Body: ${textBody.substring(0, 200)}`;
+        } catch (e) {
+            // ignore
+        }
+        throw new Error(`No X-CSRF-TOKEN in response header. ${errorDetails}`);
+    }
+    return token;
 }
 
 /**
@@ -113,18 +142,27 @@ async function getPlaceIdFromCreator(creatorType, creatorId, cookie, maxPlaceIds
     limit = 10;
   }
 
-  async function getGamesPage(url) {
-    const resp = await fetch(url, { headers: { Cookie: `.ROBLOSECURITY=${cookie}` } });
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      throw new Error(`Failed to get games (${resp.status}): ${errorText.substring(0, 200)}`);
+    async function getGamesPage(url) {
+
+        // Add Spoofed Headers to Mimic Roblox Studio Requests
+
+        const headers = {
+            ...SPOOFED_HEADERS,
+            'Cookie': `.ROBLOSECURITY=${cookie}`,
+            'Referer': `https://www.roblox.com/`
+        };
+
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) {
+            const errorText = await resp.text();
+            throw new Error(`Failed to get games (${resp.status}): ${errorText.substring(0, 200)}`);
+        }
+        const data = await resp.json();
+        if (!data || !data.data) {
+            throw new Error(`Invalid response format. Response: ${JSON.stringify(data).substring(0, 200)}`);
+        }
+        return data;
     }
-    const data = await resp.json();
-    if (!data || !data.data) {
-      throw new Error(`Invalid response format. Response: ${JSON.stringify(data).substring(0, 200)}`);
-    }
-    return data;
-  }
 
   let allGames = [];
   let cursor = null;
@@ -165,10 +203,11 @@ async function getPlaceIdFromCreator(creatorType, creatorId, cookie, maxPlaceIds
     }
 
     // Check if there's a next page
-    if (!pageData.nextPageCursor) {
-      if (DEVELOPER_MODE) console.log(`(Dev) No more pages available`);
-      break;
-    }
+      if (allGames.length < maxPlaceIds) {
+          const delayMs = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
+          if (DEVELOPER_MODE) console.log(`(Dev) Sleep ${delayMs} ms for bypass detect...`);
+          await sleep(delayMs);
+      }
 
     cursor = pageData.nextPageCursor;
   }
