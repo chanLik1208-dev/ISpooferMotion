@@ -252,6 +252,9 @@ async function publishAnimationRbxmWithProgress(filePath, name, cookie, csrfToke
 /**
  * Publishes an Audio OGG/MP3 file to Roblox using multipart/form-data
  */
+/**
+ * Publishes an Audio OGG/MP3 file to Roblox using multipart/form-data with Operation Polling
+ */
 async function publishAudioWithProgress(filePath, name, cookie, csrfToken, groupId = null, transferId, sendTransferUpdate) {
     let fileBuffer;
     try {
@@ -261,11 +264,10 @@ async function publishAudioWithProgress(filePath, name, cookie, csrfToken, group
         return { success: false, error: `File system error: ${fileError.message}` };
     }
 
-    sendTransferUpdate({ id: transferId, name, size: fileBuffer.length, status: 'processing', direction: 'upload', progress: 0, error: null });
+    sendTransferUpdate({ id: transferId, name, size: fileBuffer.length, status: 'processing', direction: 'upload', progress: 10, error: null });
 
     try {
         const cleanName = name.substring(0, 45).replace(/[^a-zA-Z0-9\s-_]/g, '').trim() || 'Uploaded Audio';
-
         const formData = new FormData();
 
         const requestConfig = {
@@ -275,19 +277,16 @@ async function publishAudioWithProgress(filePath, name, cookie, csrfToken, group
         };
 
         if (groupId) {
-            requestConfig.creationContext = {
-                creator: { groupId: String(groupId) }
-            };
+            requestConfig.creationContext = { creator: { groupId: String(groupId) } };
         }
 
         formData.append('request', JSON.stringify(requestConfig));
-
         const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
         formData.append('fileContent', blob, path.basename(filePath));
 
         const uploadUrl = 'https://apis.roblox.com/assets/user-auth/v1/assets';
 
-        if (DEVELOPER_MODE) console.log(`[UPLOAD DEBUG] Attempting Audio upload to: ${uploadUrl}`);
+        sendTransferUpdate({ id: transferId, status: 'processing', progress: 30, message: 'Sent...' });
 
         const response = await fetch(uploadUrl, {
             method: 'POST',
@@ -304,19 +303,60 @@ async function publishAudioWithProgress(filePath, name, cookie, csrfToken, group
         try { responseData = JSON.parse(responseText); } catch (e) { }
 
         if (!response.ok) {
-            if (response.status === 429) {
-                throw new Error(`Rate limit exceeded (429). Server says: ${responseText}`);
-            }
-            throw new Error(`Upload failed (Status: ${response.status}). Response: ${responseText.substring(0, 200)}`);
+            if (response.status === 429) throw new Error('Rate limit exceeded (429).');
+            throw new Error(`Upload failed (Status: ${response.status}). Response: ${responseText.substring(0, 150)}`);
         }
 
-        const newAssetId = responseData.assetId || (responseData.response && responseData.response.assetId) || responseData.operationId;
+        let finalAssetId = responseData.assetId || (responseData.response && responseData.response.assetId);
 
-        if (newAssetId) {
-            sendTransferUpdate({ id: transferId, progress: 100, status: 'completed', newAssetId: newAssetId.toString() });
-            return { success: true, assetId: newAssetId.toString() };
+        let operationId = responseData.operationId || responseData.path;
+
+        if (!finalAssetId && operationId) {
+            operationId = operationId.replace('operations/', '');
+            const operationUrl = `https://apis.roblox.com/assets/user-auth/v1/operations/${operationId}`;
+
+            let isDone = false;
+            let attempts = 0;
+            const maxAttempts = 30; // 最多等 60 秒 (30 * 2秒)
+
+            while (!isDone && attempts < maxAttempts) {
+                attempts++;
+                sendTransferUpdate({ id: transferId, status: 'processing', progress: 50 + Math.min(40, attempts * 2), message: `Roblox uploading... (try ${attempts}/${maxAttempts})` });
+
+                await new Promise(r => setTimeout(r, 2000)); 
+
+                const opResponse = await fetch(operationUrl, {
+                    method: 'GET',
+                    headers: {
+                        'Cookie': `.ROBLOSECURITY=${cookie}`,
+                        'X-CSRF-TOKEN': csrfToken,
+                        'User-Agent': 'RobloxStudio/WinInet'
+                    }
+                });
+
+                if (opResponse.ok) {
+                    const opData = await opResponse.json();
+                    if (opData.done) {
+                        isDone = true;
+                        if (opData.response && opData.response.assetId) {
+                            finalAssetId = opData.response.assetId;
+                        } else {
+                            throw new Error('Roblox Not Relpy Asset ID');
+                        }
+                    }
+                }
+            }
+
+            if (!isDone) {
+                throw new Error(`音效處理超時 (已等待 60 秒)。Operation ID: ${operationId}`);
+            }
+        }
+
+        if (finalAssetId) {
+            sendTransferUpdate({ id: transferId, progress: 100, status: 'completed', newAssetId: finalAssetId.toString() });
+            return { success: true, assetId: finalAssetId.toString() };
         } else {
-            throw new Error(`Response did not contain an asset ID. Response: ${responseText.substring(0, 200)}`);
+            throw new Error(`無法解析 Asset ID。Response: ${responseText.substring(0, 150)}`);
         }
 
     } catch (err) {
@@ -326,6 +366,7 @@ async function publishAudioWithProgress(filePath, name, cookie, csrfToken, group
         return { success: false, error: errorMsg };
     }
 }
+
 module.exports = {
   downloadAnimationAssetWithProgress,
     publishAnimationRbxmWithProgress,
