@@ -555,7 +555,7 @@ async function handleSpooferAction(data, getMainWindowFn, sendTransferUpdate, se
   });
   const downloadResults = await Promise.all(downloadPromises);
 
-  // Parallel uploads (skip if download-only mode)
+    // Parallel uploads (skip if download-only mode)
   let uploadResults = [];
   if (data.downloadOnly) {
     sendStatusMessage('Download-only mode: Skipping uploads');
@@ -595,8 +595,35 @@ async function handleSpooferAction(data, getMainWindowFn, sendTransferUpdate, se
         error: err.message.substring(0, 120),
       });
     };
-    const uploadFn = () => publishAnimationRbxmWithProgress(filePath, entry.name, robloxCookie, csrfToken, data.groupId && String(data.groupId).trim() ? data.groupId : null, uploadTransferId, sendTransferUpdate, assetTypeName);
-    try {
+        const uploadFn = () => {
+            const targetGroupId = data.groupId && String(data.groupId).trim() ? data.groupId : null;
+
+            // 💡 如果是音效模式，呼叫新寫的 publishAudioWithProgress
+            if (isSoundMode) {
+                // 請確保 ipc-handlers.js 頂部有引入 publishAudioWithProgress
+                return publishAudioWithProgress(
+                    filePath,
+                    entry.name,
+                    robloxCookie,
+                    csrfToken,
+                    targetGroupId,
+                    uploadTransferId,
+                    sendTransferUpdate
+                );
+            } else {
+                // 如果是動畫，呼叫舊的
+                return publishAnimationRbxmWithProgress(
+                    filePath,
+                    entry.name,
+                    robloxCookie,
+                    csrfToken,
+                    targetGroupId,
+                    uploadTransferId,
+                    sendTransferUpdate,
+                    assetTypeName
+                );
+            }
+        };    try {
       const uploadResult = await retryAsync(uploadFn, UPLOAD_RETRIES, UPLOAD_RETRY_DELAY_MS, onRetryAttempt);
       uploadCompleted++;
       const elapsed = (Date.now() - uploadStartTime) / 1000;

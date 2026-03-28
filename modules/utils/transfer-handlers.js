@@ -4,6 +4,8 @@ const fsSync = require('fs');
 const fs = require('fs').promises;
 const { DEVELOPER_MODE } = require('./common');
 
+const FormData = globalThis.FormData || require('formdata-node').FormData;
+const Blob = globalThis.Blob || require('formdata-node').Blob;
 /**
  * Downloads an animation asset with progress reporting
  */
@@ -247,7 +249,81 @@ async function publishAnimationRbxmWithProgress(filePath, name, cookie, csrfToke
   }
 }
 
+/**
+ * Publishes an Audio OGG/MP3 file to Roblox using multipart/form-data
+ */
+async function publishAudioWithProgress(filePath, name, cookie, csrfToken, groupId = null, transferId, sendTransferUpdate) {
+    let fileBuffer;
+    try {
+        fileBuffer = await fs.readFile(filePath);
+    } catch (fileError) {
+        sendTransferUpdate({ id: transferId, name, status: 'error', direction: 'upload', error: `File system error: ${fileError.message}` });
+        return { success: false, error: `File system error: ${fileError.message}` };
+    }
+
+    sendTransferUpdate({ id: transferId, name, size: fileBuffer.length, status: 'processing', direction: 'upload', progress: 0, error: null });
+
+    try {
+        const cleanName = name.substring(0, 45).replace(/[^a-zA-Z0-9\s-_]/g, '').trim() || 'Uploaded Audio';
+
+        const formData = new FormData();
+
+        const requestConfig = {
+            assetType: 'Audio',
+            displayName: cleanName,
+            description: 'Uploaded via ISpooferMotion',
+            creationContext: {
+                creator: groupId ? { groupId: String(groupId) } : { userId: "0" }
+            }
+        };
+        formData.append('request', JSON.stringify(requestConfig));
+
+        const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
+        formData.append('fileContent', blob, path.basename(filePath));
+
+        const uploadUrl = 'https://apis.roblox.com/assets/user-auth/v1/assets';
+
+        if (DEVELOPER_MODE) console.log(`[UPLOAD DEBUG] Attempting Audio upload to: ${uploadUrl}`);
+
+        const response = await fetch(uploadUrl, {
+            method: 'POST',
+            headers: {
+                'Cookie': `.ROBLOSECURITY=${cookie}`,
+                'X-CSRF-TOKEN': csrfToken,
+                'User-Agent': 'RobloxStudio/WinInet'
+            },
+            body: formData
+        });
+
+        const responseText = await response.text();
+        let responseData = {};
+        try { responseData = JSON.parse(responseText); } catch (e) { }
+
+        if (!response.ok) {
+            if (response.status === 429) {
+                throw new Error(`Rate limit exceeded (429). Server says: ${responseText}`);
+            }
+            throw new Error(`Upload failed (Status: ${response.status}). Response: ${responseText.substring(0, 200)}`);
+        }
+
+        const newAssetId = responseData.assetId || (responseData.response && responseData.response.assetId) || responseData.operationId;
+
+        if (newAssetId) {
+            sendTransferUpdate({ id: transferId, progress: 100, status: 'completed', newAssetId: newAssetId.toString() });
+            return { success: true, assetId: newAssetId.toString() };
+        } else {
+            throw new Error(`Response did not contain an asset ID. Response: ${responseText.substring(0, 200)}`);
+        }
+
+    } catch (err) {
+        const errorMsg = err.message || `Audio upload failed for unknown reason.`;
+        if (DEVELOPER_MODE) console.error(`[UPLOAD ERROR] Audio upload failed: ${errorMsg}`);
+        sendTransferUpdate({ id: transferId, status: 'error', error: errorMsg, progress: 0 });
+        return { success: false, error: errorMsg };
+    }
+}
 module.exports = {
   downloadAnimationAssetWithProgress,
-  publishAnimationRbxmWithProgress,
+    publishAnimationRbxmWithProgress,
+    publishAudioWithProgress,
 };
