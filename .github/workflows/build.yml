@@ -31,10 +31,10 @@ jobs:
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 💡 加入這一行提供權限
       run: npm run build -- --publish never
-    # 5. 將編譯好的 .exe 檔案上傳為 Artifact，供你下載
+    # 5. 將編譯好的安裝檔上傳為 Artifact，供您下載
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: roblox-tool-windows
-        path: roblox-tool.exe
-        retention-days: 7 # 檔案保留天數
+        name: ISpooferMotion-Windows-Build # 💡 可以順便把名字改成您的專案名稱
+        path: dist/ # 💡 關鍵修改：告訴 GitHub 去 dist 資料夾裡面抓檔案
+        retention-days: 7
