@@ -335,7 +335,8 @@ async function handleSpooferAction(data, getMainWindowFn, sendTransferUpdate, se
             // Delay
             await new Promise(r => setTimeout(r, 400));
         }
-    } else {
+    }
+    else {
         if (DEVELOPER_MODE) console.log(`(Dev) Fetching batch locations for ${batchItems.length} ${isSoundMode ? 'sounds' : 'animations'} with creator-specific placeIds`);
         for (let i = 0; i < batchItems.length; i += chunkSize) {
             const chunk = batchItems.slice(i, i + chunkSize);

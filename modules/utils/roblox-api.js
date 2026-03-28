@@ -276,7 +276,8 @@ async function getAudioCdnUrl(assetId, cookie) {
     const data = await response.json();
     if (data.locations && data.locations.length > 0) {
         return data.locations[0].location;
-    throw new Error('403: Not Perm or Not in server');
+        throw new Error('403: Not Perm or Not in server');
+    }
 }
 
 async function downloadAudioById(assetId, cookie, outputPath) {
@@ -299,10 +300,10 @@ async function downloadAudioById(assetId, cookie, outputPath) {
 }
 
 module.exports = {
-  getCookieFromRobloxStudio,
-  getCsrfToken,
-  getPlaceIdFromCreator,
-  getMultiplePlaceIds,
-  downloadAudioById,
-  getAudioCdnUrl,
+        getCookieFromRobloxStudio,
+        getCsrfToken,
+        getPlaceIdFromCreator,
+        getMultiplePlaceIds,
+        downloadAudioById,
+        getAudioCdnUrl,
 };
