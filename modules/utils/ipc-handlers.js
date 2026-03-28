@@ -568,7 +568,7 @@ async function handleSpooferAction(data, getMainWindowFn, sendTransferUpdate, se
 
         // 取得使用者設定的延遲時間，如果沒有則預設為 10000 毫秒 (10秒)
         // ⚠️ 針對大量音效上傳，強烈建議至少設定 10 秒以上的延遲
-        const uploadDelayMs = parseInt(data.uploadDelayMs, 5) || 5000;
+        const uploadDelayMs = parseInt(data.uploadDelayMs, 2) || 2000;
 
         for (let i = 0; i < successfulDownloads.length; i++) {
             const downloadResult = successfulDownloads[i];
