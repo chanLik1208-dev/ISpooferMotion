@@ -258,8 +258,48 @@ async function getMultiplePlaceIds(creatorType, creatorId, cookie, maxPlaceIds =
  * Spoof Client Headers is roblox gaming loading and Get Audio CDN URL from AssetDelivery API
  */
 async function getAudioCdnUrl(assetId, cookie) {
-    const endpoint = `https://assetdelivery.roblox.com/v2/assetId/${assetId}`;
+    // 💡 方法一：網頁爬蟲法 (Sound Downloader 網站的慣用手法)
+    // 直接抓取網頁原始碼中的播放器預覽網址，這招能繞過多數的 API 權限鎖
+    try {
+        const htmlResponse = await fetch(`https://www.roblox.com/library/${assetId}/`, {
+            headers: {
+                'Cookie': `.ROBLOSECURITY=${cookie}`,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36'
+            }
+        });
 
+        if (htmlResponse.ok) {
+            const htmlText = await htmlResponse.text();
+            // 使用正規表達式找出隱藏在 HTML 裡的 CDN 網址
+            const match = htmlText.match(/data-mediathumb-url="([^"]+)"/i);
+            if (match && match[1]) {
+                if (DEVELOPER_MODE) console.log(`[CDN 解析] 成功透過網頁爬蟲後門獲取網址: ${assetId}`);
+                return match[1];
+            }
+        }
+    } catch (e) {
+        if (DEVELOPER_MODE) console.warn(`[CDN 解析] 網頁爬蟲失敗，嘗試下一種方法...`);
+    }
+
+    // 💡 方法二：V1 舊版 API 重導向法
+    try {
+        const v1Response = await fetch(`https://assetdelivery.roblox.com/v1/asset/?id=${assetId}&expectedAssetType=Audio`, {
+            headers: {
+                'Cookie': `.ROBLOSECURITY=${cookie}`,
+                'User-Agent': 'Roblox/WinInet'
+            }
+        });
+        // fetch 會自動跟隨重導向，如果成功，最終的 response.url 就會是 CDN 網址
+        if (v1Response.url && v1Response.url.includes('rbxcdn.com')) {
+            if (DEVELOPER_MODE) console.log(`[CDN 解析] 成功透過 V1 重導向獲取網址: ${assetId}`);
+            return v1Response.url;
+        }
+    } catch (e) {
+        // 忽略錯誤，繼續進入兜底方案
+    }
+
+    // 💡 方法三：V2 正規 API (兜底方案)
+    const endpoint = `https://assetdelivery.roblox.com/v2/assetId/${assetId}`;
     const response = await fetch(endpoint, {
         headers: {
             'Cookie': `.ROBLOSECURITY=${cookie}`,
@@ -270,14 +310,20 @@ async function getAudioCdnUrl(assetId, cookie) {
     });
 
     if (!response.ok) {
-        throw new Error(`AssetDelivery API Refused (${response.status})`);
+        throw new Error(`AssetDelivery API 拒絕請求 (${response.status})`);
     }
 
     const data = await response.json();
     if (data.locations && data.locations.length > 0) {
-        return data.locations[0].location;
-        throw new Error('403: Not Perm or Not in server');
+        // 有些私有音效會回傳 location: null，這裡加強防呆檢查
+        const url = data.locations[0].location || data.locations[0].url || data.locations[0].Url;
+        if (url) {
+            if (DEVELOPER_MODE) console.log(`[CDN 解析] 成功透過 V2 API 獲取網址: ${assetId}`);
+            return url;
+        }
     }
+
+    throw new Error('此音效已失效、被官方徹底刪除，或無任何 CDN 節點可供提取。');
 }
 
 async function downloadAudioById(assetId, cookie, outputPath) {
