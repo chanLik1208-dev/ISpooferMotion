@@ -271,11 +271,15 @@ async function publishAudioWithProgress(filePath, name, cookie, csrfToken, group
         const requestConfig = {
             assetType: 'Audio',
             displayName: cleanName,
-            description: 'Uploaded via ISpooferMotion',
-            creationContext: {
-                creator: groupId ? { groupId: String(groupId) } : { userId: "0" }
-            }
+            description: 'Uploaded via ISpooferMotion'
         };
+
+        if (groupId) {
+            requestConfig.creationContext = {
+                creator: { groupId: String(groupId) }
+            };
+        }
+
         formData.append('request', JSON.stringify(requestConfig));
 
         const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
