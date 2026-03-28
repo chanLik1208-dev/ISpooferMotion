@@ -5,7 +5,7 @@ const crypto = require('crypto');
 const { DEVELOPER_MODE } = require('./common');
 const { getCookieFromRobloxStudio, getCsrfToken, getPlaceIdFromCreator, getAudioCdnUrl } = require('./roblox-api');
 const { clearDownloadsDirectory, retryAsync, sanitizeFilename } = require('./common');
-const { downloadAnimationAssetWithProgress, publishAnimationRbxmWithProgress } = require('./transfer-handlers');
+const { downloadAnimationAssetWithProgress, publishAnimationRbxmWithProgress, publishAudioWithProgress } = require('./transfer-handlers');
 const fs = require('fs').promises;
 
 /**
