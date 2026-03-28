@@ -28,8 +28,9 @@ jobs:
 
     # 4. 執行編譯/打包指令
     - name: Compile Executable
-      run: npm run build
-
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }} # 💡 加入這一行提供權限
+      run: npm run build -- --publish never
     # 5. 將編譯好的 .exe 檔案上傳為 Artifact，供你下載
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
