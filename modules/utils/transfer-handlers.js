@@ -250,121 +250,148 @@ async function publishAnimationRbxmWithProgress(filePath, name, cookie, csrfToke
 }
 
 /**
- * Publishes an Audio OGG/MP3 file to Roblox using multipart/form-data
- */
-/**
- * Publishes an Audio OGG/MP3 file to Roblox using multipart/form-data with Operation Polling
+ * Publishes an Audio OGG/MP3 file to Roblox using multipart/form-data with Operation Polling & CSRF Auto-Refresh
  */
 async function publishAudioWithProgress(filePath, name, cookie, csrfToken, groupId = null, transferId, sendTransferUpdate) {
-    let fileBuffer;
-    try {
-        fileBuffer = await fs.readFile(filePath);
-    } catch (fileError) {
-        sendTransferUpdate({ id: transferId, name, status: 'error', direction: 'upload', error: `File system error: ${fileError.message}` });
-        return { success: false, error: `File system error: ${fileError.message}` };
+  let fileBuffer;
+  try {
+    fileBuffer = await fs.readFile(filePath);
+  } catch (fileError) {
+    sendTransferUpdate({ id: transferId, name, status: 'error', direction: 'upload', error: `File system error: ${fileError.message}` });
+    return { success: false, error: `File system error: ${fileError.message}` };
+  }
+
+  sendTransferUpdate({ id: transferId, name, size: fileBuffer.length, status: 'processing', direction: 'upload', progress: 10, error: null });
+
+  try {
+    const cleanName = name.substring(0, 45).replace(/[^a-zA-Z0-9\s-_]/g, '').trim() || 'Uploaded Audio';
+    const uploadUrl = 'https://apis.roblox.com/assets/user-auth/v1/assets';
+    let currentCsrfToken = csrfToken; // 使用傳進來的 Token 作為初始值
+    let response;
+    let responseText = '';
+
+    // 💡 建立一個可重用的函式來發送上傳請求，方便我們在 Token 失效時重試
+    const performUploadRequest = async (token) => {
+      const formData = new FormData();
+      const requestConfig = {
+        assetType: 'Audio',
+        displayName: cleanName,
+        description: 'Uploaded via ISpooferMotion'
+      };
+      if (groupId) {
+        requestConfig.creationContext = { creator: { groupId: String(groupId) } };
+      }
+      formData.append('request', JSON.stringify(requestConfig));
+      const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
+      formData.append('fileContent', blob, path.basename(filePath));
+
+      return await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Cookie': `.ROBLOSECURITY=${cookie}`,
+          'X-CSRF-TOKEN': token,
+          'User-Agent': 'RobloxStudio/WinInet'
+        },
+        body: formData
+      });
+    };
+
+    sendTransferUpdate({ id: transferId, status: 'processing', progress: 30, message: '正在傳送至 Roblox 伺服器...' });
+
+    // 第一次嘗試上傳
+    response = await performUploadRequest(currentCsrfToken);
+
+    // 💡 核心修復：攔截 403 XSRF token invalid 錯誤並自動刷新
+    if (response.status === 403) {
+      responseText = await response.text();
+      if (responseText.includes('XSRF token invalid') || responseText.includes('Token Validation Failed')) {
+        if (DEVELOPER_MODE) console.log(`[UPLOAD DEBUG] CSRF Token invalid. Attempting to fetch a fresh token from response headers...`);
+        
+        // Roblox 會在 403 的回應標頭中附上正確的新 Token
+        const freshToken = response.headers.get('x-csrf-token');
+        
+        if (freshToken) {
+          if (DEVELOPER_MODE) console.log(`[UPLOAD DEBUG] Got fresh token. Retrying upload...`);
+          currentCsrfToken = freshToken; // 更新 Token
+          
+          // 用新的 Token 再發送一次請求
+          response = await performUploadRequest(currentCsrfToken);
+        } else {
+           throw new Error('CSRF Token invalid and server did not provide a fresh token in headers.');
+        }
+      }
     }
 
-    sendTransferUpdate({ id: transferId, name, size: fileBuffer.length, status: 'processing', direction: 'upload', progress: 10, error: null });
+    // 檢查最終的 Response 狀態
+    if (!response.ok) {
+      responseText = await response.text(); // 確保讀取到錯誤訊息
+      if (response.status === 429) throw new Error('Rate limit exceeded (429).');
+      throw new Error(`Upload failed (Status: ${response.status}). Response: ${responseText.substring(0, 150)}`);
+    }
 
-    try {
-        const cleanName = name.substring(0, 45).replace(/[^a-zA-Z0-9\s-_]/g, '').trim() || 'Uploaded Audio';
-        const formData = new FormData();
+    // 讀取成功的回應
+    responseText = await response.text();
+    let responseData = {};
+    try { responseData = JSON.parse(responseText); } catch (e) {}
 
-        const requestConfig = {
-            assetType: 'Audio',
-            displayName: cleanName,
-            description: 'Uploaded via ISpooferMotion'
-        };
+    // 以下是您之前寫好的 Polling 邏輯，完全保留：
+    let finalAssetId = responseData.assetId || (responseData.response && responseData.response.assetId);
+    let operationId = responseData.operationId || responseData.path; 
 
-        if (groupId) {
-            requestConfig.creationContext = { creator: { groupId: String(groupId) } };
-        }
+    if (!finalAssetId && operationId) {
+      operationId = operationId.replace('operations/', '');
+      const operationUrl = `https://apis.roblox.com/assets/user-auth/v1/operations/${operationId}`;
+      
+      let isDone = false;
+      let attempts = 0;
+      const maxAttempts = 30;
 
-        formData.append('request', JSON.stringify(requestConfig));
-        const blob = new Blob([fileBuffer], { type: 'audio/ogg' });
-        formData.append('fileContent', blob, path.basename(filePath));
+      while (!isDone && attempts < maxAttempts) {
+        attempts++;
+        sendTransferUpdate({ id: transferId, status: 'processing', progress: 50 + Math.min(40, attempts * 2), message: `Roblox 正在處理音效中... (嘗試 ${attempts}/${maxAttempts})` });
+        
+        await new Promise(r => setTimeout(r, 2000));
 
-        const uploadUrl = 'https://apis.roblox.com/assets/user-auth/v1/assets';
-
-        sendTransferUpdate({ id: transferId, status: 'processing', progress: 30, message: 'Sent...' });
-
-        const response = await fetch(uploadUrl, {
-            method: 'POST',
-            headers: {
-                'Cookie': `.ROBLOSECURITY=${cookie}`,
-                'X-CSRF-TOKEN': csrfToken,
-                'User-Agent': 'RobloxStudio/WinInet'
-            },
-            body: formData
+        const opResponse = await fetch(operationUrl, {
+          method: 'GET',
+          headers: {
+            'Cookie': `.ROBLOSECURITY=${cookie}`,
+            'X-CSRF-TOKEN': currentCsrfToken, // 使用最新的 Token
+            'User-Agent': 'RobloxStudio/WinInet'
+          }
         });
 
-        const responseText = await response.text();
-        let responseData = {};
-        try { responseData = JSON.parse(responseText); } catch (e) { }
-
-        if (!response.ok) {
-            if (response.status === 429) throw new Error('Rate limit exceeded (429).');
-            throw new Error(`Upload failed (Status: ${response.status}). Response: ${responseText.substring(0, 150)}`);
-        }
-
-        let finalAssetId = responseData.assetId || (responseData.response && responseData.response.assetId);
-
-        let operationId = responseData.operationId || responseData.path;
-
-        if (!finalAssetId && operationId) {
-            operationId = operationId.replace('operations/', '');
-            const operationUrl = `https://apis.roblox.com/assets/user-auth/v1/operations/${operationId}`;
-
-            let isDone = false;
-            let attempts = 0;
-            const maxAttempts = 30; // 最多等 60 秒 (30 * 2秒)
-
-            while (!isDone && attempts < maxAttempts) {
-                attempts++;
-                sendTransferUpdate({ id: transferId, status: 'processing', progress: 50 + Math.min(40, attempts * 2), message: `Roblox uploading... (try ${attempts}/${maxAttempts})` });
-
-                await new Promise(r => setTimeout(r, 2000)); 
-
-                const opResponse = await fetch(operationUrl, {
-                    method: 'GET',
-                    headers: {
-                        'Cookie': `.ROBLOSECURITY=${cookie}`,
-                        'X-CSRF-TOKEN': csrfToken,
-                        'User-Agent': 'RobloxStudio/WinInet'
-                    }
-                });
-
-                if (opResponse.ok) {
-                    const opData = await opResponse.json();
-                    if (opData.done) {
-                        isDone = true;
-                        if (opData.response && opData.response.assetId) {
-                            finalAssetId = opData.response.assetId;
-                        } else {
-                            throw new Error('Roblox Not Relpy Asset ID');
-                        }
-                    }
-                }
+        if (opResponse.ok) {
+          const opData = await opResponse.json();
+          if (opData.done) {
+            isDone = true;
+            if (opData.response && opData.response.assetId) {
+              finalAssetId = opData.response.assetId;
+            } else {
+              throw new Error('Roblox 處理完成，但未回傳 Asset ID (可能未通過版權/內容審核)。');
             }
-
-            if (!isDone) {
-                throw new Error(`音效處理超時 (已等待 60 秒)。Operation ID: ${operationId}`);
-            }
+          }
         }
+      }
 
-        if (finalAssetId) {
-            sendTransferUpdate({ id: transferId, progress: 100, status: 'completed', newAssetId: finalAssetId.toString() });
-            return { success: true, assetId: finalAssetId.toString() };
-        } else {
-            throw new Error(`無法解析 Asset ID。Response: ${responseText.substring(0, 150)}`);
-        }
-
-    } catch (err) {
-        const errorMsg = err.message || `Audio upload failed for unknown reason.`;
-        if (DEVELOPER_MODE) console.error(`[UPLOAD ERROR] Audio upload failed: ${errorMsg}`);
-        sendTransferUpdate({ id: transferId, status: 'error', error: errorMsg, progress: 0 });
-        return { success: false, error: errorMsg };
+      if (!isDone) {
+        throw new Error(`音效處理超時 (已等待 60 秒)。Operation ID: ${operationId}`);
+      }
     }
+
+    if (finalAssetId) {
+      sendTransferUpdate({ id: transferId, progress: 100, status: 'completed', newAssetId: finalAssetId.toString() });
+      return { success: true, assetId: finalAssetId.toString() };
+    } else {
+      throw new Error(`無法解析 Asset ID。Response: ${responseText.substring(0, 150)}`);
+    }
+
+  } catch (err) {
+    const errorMsg = err.message || `Audio upload failed for unknown reason.`;
+    if (DEVELOPER_MODE) console.error(`[UPLOAD ERROR] Audio upload failed: ${errorMsg}`);
+    sendTransferUpdate({ id: transferId, status: 'error', error: errorMsg, progress: 0 });
+    return { success: false, error: errorMsg };
+  }
 }
 
 module.exports = {
